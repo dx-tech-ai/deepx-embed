@@ -15,6 +15,7 @@ from pathlib import Path
 
 from config import DeepXConfig
 from modeling.pipeline import DeepXPipeline
+from modeling.embedding_model import DeepXEmbeddingModel
 
 
 class DeepXEmbed:
@@ -69,7 +70,7 @@ class DeepXEmbed:
         pipeline = object.__new__(DeepXPipeline)
         nn.Module.__init__(pipeline)
         pipeline.config = config
-        pipeline.backbone = __import__("modeling.embedding_model", fromlist=["DeepXEmbeddingModel"]).DeepXEmbeddingModel(config)
+        pipeline.backbone = DeepXEmbeddingModel(config)
 
         # --- Load token embedding (pruned) ---
         embed_data = torch.load(embed_path, map_location="cpu", weights_only=True)
