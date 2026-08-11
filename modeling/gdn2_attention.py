@@ -3,12 +3,11 @@ Gated DeltaNet-2 Dual-Path Attention.
 
 Dual-path design:
   Path 1 (Softmax): Standard chunked softmax attention with RoPE
-          → Uses Gemma Q,K,V weights directly, 100% compatible
   Path 2 (GDN-2):  Gated Delta Rule-2 with channel-wise erase/write gates
-          → Learns linear attention gradually (init as near-no-op)
+          → O(n) linear attention
 
 Merge: output = α × softmax_path + (1-α) × gdn2_path
-  α init ≈ 1.0 → model starts as pure softmax (Gemma weights work perfectly)
+  α init ≈ 1.0 → model starts as pure softmax
   α learned → shifts to GDN-2 as training progresses (O(T) inference)
 
 Gated Delta Rule-2 (per timestep):
@@ -54,7 +53,7 @@ class GatedDeltaNet2Attention(nn.Module):
     """
     Dual-Path: Softmax + Gated DeltaNet-2.
     
-    Init strategy: α ≈ 1 (pure softmax) → Gemma weights work immediately.
+    Init strategy: α ≈ 1 (pure softmax) at start.
     Training shifts α towards GDN-2 path for O(T) inference.
     """
 
@@ -89,7 +88,7 @@ class GatedDeltaNet2Attention(nn.Module):
         self.chunk_size = chunk_size
         self.use_dual_path = use_dual_path
 
-        # === Shared projections (from Gemma 4 E2B) ===
+        # === Shared projections ===
         self.q_proj = nn.Linear(hidden_size, num_heads * head_dim, bias=False)
         self.k_proj = nn.Linear(hidden_size, num_kv_heads * head_dim, bias=False)
         self.v_proj = nn.Linear(hidden_size, num_kv_heads * head_dim, bias=False)

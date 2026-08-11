@@ -1,18 +1,17 @@
 """
-DeepX v0.7 — Gated DeltaNet-2 Hyperloop + ColBERT Configuration.
+DeepX v1.0 — Gated DeltaNet-2 Hyperloop + ColBERT Configuration.
 
 Architecture:
-  Begin(4 NarrowA) → Phase1 Loop×2 [WideA + NarrowA×4] → Transition(WideA)
-  → Phase2 Loop×4 [WideB + NarrowB×4] → End(WideB) = 35 passes
+  Begin(4 NarrowA) → Phase1 Loop×2 [WideA + NarrowA×4]
+  → Phase2 Loop×4 [NarrowB×4 + WideB] → End(WideB) = 35 passes
 
-Gemma 4 E2B layers:
-  - NarrowA: 8 heads, 1 KV head, head_dim=256, MLP=6144  (layers 0-3, 5-8, 10-13)
-  - NarrowB: 8 heads, 1 KV head, head_dim=256, MLP=12288 (layers 15-18, 20-23, 25-28, 30-33)
-  - WideA:   16 heads, 2 KV heads, head_dim=256, MLP=6144 (layers 4, 9, 14)
-  - WideB:   16 heads, 2 KV heads, head_dim=256, MLP=12288 (layers 19, 24, 29, 34)
+Layer types:
+  - NarrowA: 8 heads, 1 KV head, head_dim=256, MLP=6144
+  - NarrowB: 8 heads, 1 KV head, head_dim=256, MLP=12288
+  - WideA:   16 heads, 2 KV heads, head_dim=256, MLP=6144
+  - WideB:   16 heads, 2 KV heads, head_dim=256, MLP=12288
 
-Attention: Gated DeltaNet-2 (dual-path: softmax + delta rule)
-Weight Init: Copy Q/K/V/O + MLP from Gemma 4 E2B → ~95% pretrained.
+Attention: Gated DeltaNet-2 (dual-path: softmax + delta rule, O(n) linear)
 """
 
 from dataclasses import dataclass
@@ -41,13 +40,12 @@ class WideLayerConfig:
 @dataclass
 class DeepXConfig:
     """
-    DeepX v0.7 — Gated DeltaNet-2 Hyperloop + ColBERT.
+    DeepX v1.0 — Gated DeltaNet-2 Hyperloop + ColBERT.
     
-    35 compute passes matching Gemma 4 E2B depth.
-    9 unique layer parameter sets (4 shared cores + 4 begin + 1 end).
+    35 compute passes, 9 unique layer parameter sets (4 shared cores + 4 begin + 1 end).
     """
     
-    # --- Base dimensions (Gemma 4 E2B compatible) ---
+    # --- Base dimensions ---
     vocab_size: int = 262144
     hidden_size: int = 1536
     max_position_embeddings: int = 131072

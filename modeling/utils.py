@@ -63,7 +63,6 @@ class YaRNRotaryEmbedding(nn.Module):
     """
     RoPE with YaRN (Yet another RoPE extensioN) scaling.
     
-    Same approach as Gemma 4 E2B:
     - Base theta = 1,000,000
     - YaRN scaling for context extension to 128K
     - Splits dimensions into 3 regions:

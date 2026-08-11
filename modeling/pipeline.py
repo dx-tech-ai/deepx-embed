@@ -1,16 +1,14 @@
 """
-DeepX v0.6 Full Pipeline.
+DeepX v1.0 Full Pipeline.
 
 Combines:
-  1. Frozen Gemma 4 E2B token embedding (loaded from pretrained/gemma4_e2b_embed.pt)
-  2. Pure GLA Hyperloop backbone + ColBERT head (PureGLAEmbeddingModel)
+  1. Frozen token embedding (pruned 186K vocab, loaded from HuggingFace)
+  2. GDN-2 Hyperloop backbone + ColBERT head
 
 Outputs:
   - encode()         → single vector (1536-d) for fast ANN retrieval
   - encode_colbert() → token vectors (T × 128-d) for MaxSim reranking
   - encode_multi()   → both single + token vectors in one forward pass
-
-Weight Init: ~90% of backbone can be copied from Gemma 4 E2B.
 """
 
 import torch
@@ -20,7 +18,7 @@ import dataclasses
 from typing import Optional, Tuple
 from pathlib import Path
 
-from config import HybridEmbeddingConfig
+from config import DeepXConfig
 from .embedding_model import DeepXEmbeddingModel
 
 logger = logging.getLogger(__name__)
@@ -28,39 +26,34 @@ logger = logging.getLogger(__name__)
 
 class DeepXPipeline(nn.Module):
     """
-    Full DeepX v0.6 embedding pipeline.
+    Full DeepX embedding pipeline.
 
-    Token embedding is frozen and loaded from a pre-extracted file.
-    Only the backbone (PureGLAEmbeddingModel) is trained.
+    Token embedding is frozen. Only the backbone is trained.
     """
 
     def __init__(
         self,
-        config: HybridEmbeddingConfig,
+        config: DeepXConfig,
         embed_path: str = None,
     ):
         super().__init__()
         self.config = config
 
-        # --- Token Embedding ---
-        # If embed_path provided, load from file. Otherwise, create empty (to be filled later).
+        # --- Token Embedding (frozen) ---
         if embed_path is not None:
             embed_path = Path(embed_path)
             if not embed_path.exists():
                 raise FileNotFoundError(
                     f"Token embedding not found at '{embed_path}'.\n"
-                    f"If using from_pretrained(), this is handled automatically."
+                    f"Use DeepXEmbed.from_pretrained() to load from HuggingFace."
                 )
 
             logger.info(f"Loading frozen token embedding from {embed_path} ...")
             weight = torch.load(embed_path, weights_only=True)
+            if isinstance(weight, dict) and "weight" in weight:
+                weight = weight["weight"]
 
-            assert weight.shape == (config.vocab_size, config.hidden_size), (
-                f"Embedding shape mismatch: expected ({config.vocab_size}, {config.hidden_size}), "
-                f"got {tuple(weight.shape)}. Check config.hidden_size matches source model."
-            )
-
-            self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+            self.token_embedding = nn.Embedding(weight.shape[0], weight.shape[1])
             self.token_embedding.weight.data = weight.to(config.torch_dtype)
             self.token_embedding.requires_grad_(False)
             logger.info(f"Token embedding frozen. Shape: {weight.shape}, dtype: {config.torch_dtype}")
@@ -129,7 +122,7 @@ class DeepXPipeline(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         truncate_dim: Optional[int] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Alias for encode_colbert with optional truncation on single vector."""
+        """Encode both single vector and token vectors in one forward pass."""
         with torch.no_grad():
             hidden_states = self.token_embedding(input_ids)
         return self.backbone(
@@ -166,9 +159,8 @@ class DeepXPipeline(nn.Module):
         torch.save({
             "state_dict": self.backbone.state_dict(),
             "config": dataclasses.asdict(self.config),
-            "version": "0.7",
+            "version": "1.0",
             "architecture": "gdn2_hyperloop_colbert",
-            "embed_source": "gemma4_e2b",
             "hidden_size": self.config.hidden_size,
             "vocab_size": self.config.vocab_size,
             "colbert_dim": self.config.colbert_dim,
@@ -179,11 +171,11 @@ class DeepXPipeline(nn.Module):
     @classmethod
     def from_pretrained(
         cls,
-        config: HybridEmbeddingConfig,
+        config: DeepXConfig,
         embed_path: str,
         backbone_path: str,
     ) -> "DeepXPipeline":
-        """Load pipeline from 2 .pt files for deployment."""
+        """Load pipeline from embedding + backbone .pt files."""
         backbone_path = Path(backbone_path)
         if not backbone_path.exists():
             raise FileNotFoundError(f"Backbone weights not found at '{backbone_path}'.")
@@ -195,10 +187,12 @@ class DeepXPipeline(nn.Module):
 
         if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
+        elif isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
         else:
             state_dict = checkpoint
 
-        pipeline.backbone.load_state_dict(state_dict)
+        pipeline.backbone.load_state_dict(state_dict, strict=False)
         pipeline.backbone.to(config.torch_dtype)
         logger.info("Backbone loaded successfully.")
 

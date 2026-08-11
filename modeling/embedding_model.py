@@ -1,5 +1,5 @@
 """
-DeepX v0.7: Gated DeltaNet-2 Hyperloop Backbone + ColBERT Head.
+DeepX v1.0: Gated DeltaNet-2 Hyperloop Backbone + ColBERT Head.
 
 Architecture:
   Begin(4 NarrowA) → Phase1×2 [WideA + NarrowA×4] → Phase2×4 [NarrowB×4 + WideB]
@@ -11,8 +11,6 @@ Per-loop differentiation: LoRA + RoDE
 Outputs:
   1. Single vector (1536-d) via attention pooling
   2. Token vectors (T × 128-d) via ColBERT head
-
-Weight Init: ~95% from Gemma 4 E2B via direct copy + SVD LoRA.
 """
 
 import torch
@@ -49,7 +47,7 @@ class ColBERTHead(nn.Module):
 
 class DeepXEmbeddingModel(nn.Module):
     """
-    DeepX v0.7 Backbone — Gated DeltaNet-2 Hyperloop + ColBERT.
+    DeepX v1.0 Backbone — Gated DeltaNet-2 Hyperloop + ColBERT.
     
     Receives hidden_states from external frozen token embedding.
     """
@@ -58,7 +56,7 @@ class DeepXEmbeddingModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # ═══ 1. Begin Block: 4 unique NarrowA layers (direct copy from Gemma 0-3) ═══
+        # ═══ 1. Begin Block: 4 unique NarrowA layers ═══
         self.begin_blocks = nn.ModuleList([
             make_narrow_a_layer(config, layer_idx=i)
             for i in range(config.begin_layers)
