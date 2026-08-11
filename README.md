@@ -7,7 +7,8 @@ Official inference and fine-tuning code for [DeepX Embedding v1.0](https://huggi
 ## Quick Start
 
 ```bash
-pip install torch transformers fla-org einops bitsandbytes
+pip install torch transformers huggingface_hub einops
+pip install fla        # for FLA Triton kernel (optional, falls back to sequential)
 ```
 
 ```python
@@ -44,7 +45,10 @@ embedding_256d = model.encode("query text", truncate_dim=256)
 git clone https://github.com/dx-tech-ai/deepx-embed.git
 cd deepx-embed
 pip install -e .
+pip install fla        # optional: enables FLA Triton kernel for O(n) inference
 ```
+
+> **Note**: Without `fla`, the model falls back to sequential attention (slower but functional).
 
 ## Fine-tuning
 
