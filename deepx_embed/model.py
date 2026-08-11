@@ -7,10 +7,14 @@ Usage:
     emb = model.encode("Hello world")
 """
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from typing import List, Union, Optional
 from pathlib import Path
+
+from config import DeepXConfig
+from modeling.pipeline import DeepXPipeline
 
 
 class DeepXEmbed:
@@ -32,63 +36,66 @@ class DeepXEmbed:
                       or local directory path
             device: "cuda" or "cpu"
         """
+        import os
         from huggingface_hub import hf_hub_download
         from transformers import AutoTokenizer
-        import sys
-        import os
 
-        # Download files
+        # --- Download weights from HF ---
         if os.path.isdir(model_id):
+            # Local directory
             model_dir = Path(model_id)
+            ckpt_path = model_dir / "deepx_v1.0.pt"
+            embed_path = model_dir / "token_embedding.pt"
+            remap_path = model_dir / "id_remap.pt"
         else:
-            # Download from HF
-            model_dir = Path(hf_hub_download(model_id, "checkpoints/deepx_v1.pt")).parent.parent
+            # Download from HuggingFace Hub
+            ckpt_path = Path(hf_hub_download(model_id, "deepx_v1.0.pt"))
+            embed_path = Path(hf_hub_download(model_id, "token_embedding.pt"))
+            remap_path = Path(hf_hub_download(model_id, "id_remap.pt"))
 
-            # Download all needed files
-            hf_hub_download(model_id, "checkpoints/deepx_v1.pt")
-            hf_hub_download(model_id, "deploy/pruned/token_embedding_pruned.pt")
-            hf_hub_download(model_id, "deploy/pruned/tokenizer/id_remap.pt")
-
-        # Load tokenizer
+        # --- Load tokenizer ---
         tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # Load id_remap
-        remap_path = model_dir / "deploy" / "pruned" / "tokenizer" / "id_remap.pt"
+        # --- Load id_remap (vocab pruning) ---
         id_remap = torch.load(remap_path, map_location="cpu") if remap_path.exists() else None
 
-        # Load model
-        sys.path.insert(0, str(model_dir))
-        from config import DeepXConfig
-        from modeling.pipeline import DeepXPipeline
-
+        # --- Build model from installed package (config + modeling) ---
         config = DeepXConfig()
-        embed_path = model_dir / "deploy" / "pruned" / "token_embedding_pruned.pt"
-        
-        pipeline = DeepXPipeline(config, embed_path=str(model_dir / "pretrained" / "gemma4_e2b_embed.pt"))
-        
-        # Load pruned embedding
-        if embed_path.exists():
-            import torch.nn as nn
-            pruned_data = torch.load(embed_path, map_location="cpu")
-            pruned_weight = pruned_data["weight"]
-            pipeline.token_embedding = nn.Embedding(pruned_weight.shape[0], pruned_weight.shape[1])
-            pipeline.token_embedding.weight = nn.Parameter(pruned_weight, requires_grad=False)
 
-        # Load backbone
-        ckpt_path = model_dir / "checkpoints" / "deepx_v1.pt"
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-        sd = ckpt.get("model_state_dict", ckpt)
+        # Create pipeline with a dummy embed_path — we'll override below
+        # Temporarily patch to avoid FileNotFoundError
+        pipeline = object.__new__(DeepXPipeline)
+        nn.Module.__init__(pipeline)
+        pipeline.config = config
+        pipeline.backbone = __import__("modeling.embedding_model", fromlist=["DeepXEmbeddingModel"]).DeepXEmbeddingModel(config)
+
+        # --- Load token embedding (pruned) ---
+        embed_data = torch.load(embed_path, map_location="cpu", weights_only=True)
+        if isinstance(embed_data, dict) and "weight" in embed_data:
+            embed_weight = embed_data["weight"]
+        else:
+            embed_weight = embed_data
+        
+        pipeline.token_embedding = nn.Embedding(embed_weight.shape[0], embed_weight.shape[1])
+        pipeline.token_embedding.weight = nn.Parameter(embed_weight.half(), requires_grad=False)
+
+        # --- Load backbone weights ---
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+        sd = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
         pipeline.backbone.load_state_dict(sd, strict=False)
 
-        # Setup
+        # --- Setup for inference ---
         pipeline = pipeline.half().eval()
+        
+        # Set pure GDN-2 mode (skip softmax path)
         for m in pipeline.modules():
             if hasattr(m, 'path_mix_logit'):
                 m._alpha_override = 0.0
 
-        pipeline.token_embedding = pipeline.token_embedding.to(device if device != "cuda" else "cpu")
+        # Token embedding on CPU (saves GPU VRAM), backbone on GPU
+        pipeline.token_embedding = pipeline.token_embedding.to("cpu")
         pipeline.backbone = pipeline.backbone.to(device)
 
         return cls(pipeline, tokenizer, id_remap, device)
@@ -134,14 +141,13 @@ class DeepXEmbed:
             if self.id_remap is not None:
                 input_ids = self.id_remap[input_ids]
 
-            # Trim to actual max
+            # Trim to actual max length in batch
             max_actual = int(attention_mask.sum(dim=1).max().item())
             input_ids = input_ids[:, :max_actual]
             attention_mask = attention_mask[:, :max_actual]
 
-            # Forward
-            embed_device = next(self.pipeline.token_embedding.parameters()).device
-            hidden = self.pipeline.token_embedding(input_ids.to(embed_device)).to(self.device).half()
+            # Forward: embedding on CPU, backbone on GPU
+            hidden = self.pipeline.token_embedding(input_ids).to(self.device).half()
             mask = attention_mask.to(self.device)
 
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
@@ -170,7 +176,8 @@ class DeepXEmbed:
         Encode texts to ColBERT token vectors.
 
         Returns:
-            List of arrays, each shape (num_tokens, 128)
+            For single text: array of shape (num_tokens, 128)
+            For list: list of arrays, each (num_tokens, 128)
         """
         single = isinstance(texts, str)
         if single:
@@ -187,8 +194,7 @@ class DeepXEmbed:
             if self.id_remap is not None:
                 input_ids = self.id_remap[input_ids]
 
-            embed_device = next(self.pipeline.token_embedding.parameters()).device
-            hidden = self.pipeline.token_embedding(input_ids.to(embed_device)).to(self.device).half()
+            hidden = self.pipeline.token_embedding(input_ids).to(self.device).half()
             mask = attention_mask.to(self.device)
 
             with torch.amp.autocast(device_type="cuda", dtype=torch.float16):
