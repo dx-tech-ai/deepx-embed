@@ -37,31 +37,37 @@ class DeepXPipeline(nn.Module):
     def __init__(
         self,
         config: HybridEmbeddingConfig,
-        embed_path: str = "pretrained/gemma4_e2b_embed.pt",
+        embed_path: str = None,
     ):
         super().__init__()
         self.config = config
 
-        # --- Frozen Token Embedding (Gemma 4 E2B) ---
-        embed_path = Path(embed_path)
-        if not embed_path.exists():
-            raise FileNotFoundError(
-                f"Token embedding not found at '{embed_path}'.\n"
-                f"Please run: python scripts/extract_gemma_embedding.py"
+        # --- Token Embedding ---
+        # If embed_path provided, load from file. Otherwise, create empty (to be filled later).
+        if embed_path is not None:
+            embed_path = Path(embed_path)
+            if not embed_path.exists():
+                raise FileNotFoundError(
+                    f"Token embedding not found at '{embed_path}'.\n"
+                    f"If using from_pretrained(), this is handled automatically."
+                )
+
+            logger.info(f"Loading frozen token embedding from {embed_path} ...")
+            weight = torch.load(embed_path, weights_only=True)
+
+            assert weight.shape == (config.vocab_size, config.hidden_size), (
+                f"Embedding shape mismatch: expected ({config.vocab_size}, {config.hidden_size}), "
+                f"got {tuple(weight.shape)}. Check config.hidden_size matches source model."
             )
 
-        logger.info(f"Loading frozen token embedding from {embed_path} ...")
-        weight = torch.load(embed_path, weights_only=True)
-
-        assert weight.shape == (config.vocab_size, config.hidden_size), (
-            f"Embedding shape mismatch: expected ({config.vocab_size}, {config.hidden_size}), "
-            f"got {tuple(weight.shape)}. Check config.hidden_size matches E2B."
-        )
-
-        self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.token_embedding.weight.data = weight.to(config.torch_dtype)
-        self.token_embedding.requires_grad_(False)
-        logger.info(f"Token embedding frozen. Shape: {weight.shape}, dtype: {config.torch_dtype}")
+            self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+            self.token_embedding.weight.data = weight.to(config.torch_dtype)
+            self.token_embedding.requires_grad_(False)
+            logger.info(f"Token embedding frozen. Shape: {weight.shape}, dtype: {config.torch_dtype}")
+        else:
+            # Placeholder — will be overridden by caller (e.g. DeepXEmbed.from_pretrained)
+            self.token_embedding = nn.Embedding(config.vocab_size, config.hidden_size)
+            self.token_embedding.requires_grad_(False)
 
         # --- Trainable Backbone ---
         self.backbone = DeepXEmbeddingModel(config)
