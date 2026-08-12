@@ -56,7 +56,13 @@ pip install fla        # optional: enables FLA Triton kernel for O(n) inference
 from deepx_embed import DeepXEmbed, LoRAFineTuner
 
 model = DeepXEmbed.from_pretrained("dxtech-asia/deepx-embedding-v1")
-tuner = LoRAFineTuner(model, lr=1e-5, lora_rank=16)
+
+# Default: 4-bit QLoRA (fits 8GB GPUs)
+tuner = LoRAFineTuner(model, lr=1e-5)
+
+# Other options:
+# tuner = LoRAFineTuner(model, lr=1e-5, quantize=8)     # 8-bit base
+# tuner = LoRAFineTuner(model, lr=1e-5, quantize=None)  # fp16 (needs 12GB+)
 
 # Your data: list of (query, positive, negative) triplets
 triplets = [

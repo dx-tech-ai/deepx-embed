@@ -2,7 +2,9 @@
 Example: Fine-tune DeepX Embedding on custom domain data.
 
 This example shows how to adapt the model to a new domain
-using LoRA fine-tuning with triplet data (query, positive, negative).
+using QLoRA fine-tuning with triplet data (query, positive, negative).
+
+Default uses 4-bit quantization (QLoRA) — fits 8GB GPUs.
 """
 import json
 from deepx_embed import DeepXEmbed, LoRAFineTuner
@@ -22,16 +24,21 @@ with open("data/my_domain_triplets.jsonl", "r", encoding="utf-8") as f:
 print(f"Loaded {len(triplets)} triplets")
 
 # === Fine-tune ===
+# Default: 4-bit QLoRA (lowest VRAM, fits 8GB GPUs)
 tuner = LoRAFineTuner(
     model,
     lr=1e-5,           # Learning rate (1e-5 to 5e-5 recommended)
     temperature=0.07,   # InfoNCE temperature
 )
 
+# Other quantization options:
+# tuner = LoRAFineTuner(model, lr=1e-5, quantize=8)     # 8-bit base model
+# tuner = LoRAFineTuner(model, lr=1e-5, quantize=None)  # fp16 (needs 12GB+ GPU)
+
 tuner.train(
     triplets,
     epochs=3,
-    batch_size=4,       # Reduce if OOM
+    batch_size=4,       # Reduce to 1-2 if OOM on 8GB GPUs
     log_every=10,
 )
 
@@ -39,7 +46,6 @@ tuner.train(
 tuner.save("output/my-finetuned-model/")
 
 # === Test ===
-# Reload with fine-tuned weights
 print("\nTesting fine-tuned model:")
 query = triplets[0][0]
 positive = triplets[0][1]
