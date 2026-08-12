@@ -66,10 +66,16 @@ def _quantize_model(model: nn.Module, bits: int = 4):
                 new_layer.weight = bnb.nn.Params4bit(
                     module.weight.data, requires_grad=False, quant_type="nf4"
                 ) if bits == 4 else module.weight
-                
+
                 if module.bias is not None:
                     new_layer.bias = module.bias
-                
+
+                # Moving to the target device is what actually triggers bitsandbytes
+                # to pack the weight into its quantized representation. Without this,
+                # the weight stays in its original unpacked shape and forward() fails
+                # with "FP4 quantization state not initialized".
+                new_layer = new_layer.to(module.weight.device)
+
                 replacements[name] = new_layer
 
     # Apply replacements
