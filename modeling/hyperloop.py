@@ -1,10 +1,11 @@
 """
-Hyperloop Segment v0.7 — Per-Loop LoRA + RoDE for Gated DeltaNet-2.
+Hyperloop Segment v1.0 — Per-Loop LoRA + RoDE for Gated DeltaNet-2.
 
 Each loop iteration = [1 Wide + 4 Narrow] layers, with:
   1. RoDE: Rotary depth signal on Q/K inside attention
   2. Per-loop LoRA on all projections (Q/K/V/O + MLP gate/up/down)
   3. Stochastic depth for robustness
+  4. Gradient checkpointing per iteration (saves ~5x VRAM during training)
 
 Two phase types:
   Phase1: WideA(16h, MLP6144) + NarrowA×4(8h, MLP6144)
@@ -13,6 +14,7 @@ Two phase types:
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 from typing import Optional, Dict
 
 
@@ -68,6 +70,7 @@ class HyperloopPhase(nn.Module):
         wide_head_dim: int,
         wide_intermediate: int,
         wide_first: bool = True,  # True: [Wide, Narrow×4], False: [Narrow×4, Wide]
+        use_grad_checkpoint: bool = True,  # Gradient checkpointing per iteration
     ):
         super().__init__()
         self.shared_narrow = shared_narrow
@@ -75,6 +78,7 @@ class HyperloopPhase(nn.Module):
         self.num_loops = num_loops
         self.drop_path_rate = config.drop_path_rate
         self.wide_first = wide_first
+        self.use_grad_checkpoint = use_grad_checkpoint
         H = config.hidden_size
 
         # Per-loop LoRA for narrow layers (applied 4× per iteration)
@@ -128,25 +132,57 @@ class HyperloopPhase(nn.Module):
 
             if self.wide_first:
                 # [Wide, Narrow×4]
-                hidden_states = self.shared_wide(
-                    hidden_states, attention_mask=attention_mask,
-                    position_ids=position_ids, loop_idx=i, lora_deltas=wide_deltas,
+                hidden_states = self._forward_iteration_wide_first(
+                    hidden_states, attention_mask, position_ids, i, wide_deltas, narrow_deltas
                 )
-                for _ in range(4):
-                    hidden_states = self.shared_narrow(
-                        hidden_states, attention_mask=attention_mask,
-                        position_ids=position_ids, loop_idx=i, lora_deltas=narrow_deltas,
-                    )
             else:
                 # [Narrow×4, Wide]
-                for _ in range(4):
-                    hidden_states = self.shared_narrow(
-                        hidden_states, attention_mask=attention_mask,
-                        position_ids=position_ids, loop_idx=i, lora_deltas=narrow_deltas,
-                    )
-                hidden_states = self.shared_wide(
-                    hidden_states, attention_mask=attention_mask,
-                    position_ids=position_ids, loop_idx=i, lora_deltas=wide_deltas,
+                hidden_states = self._forward_iteration_narrow_first(
+                    hidden_states, attention_mask, position_ids, i, wide_deltas, narrow_deltas
                 )
 
+        return hidden_states
+
+    def _forward_iteration_wide_first(self, hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas):
+        """Single loop iteration: [Wide, Narrow×4]. Wrapped for gradient checkpointing."""
+        if self.training and self.use_grad_checkpoint:
+            return grad_checkpoint(
+                self._wide_first_fn,
+                hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas,
+                use_reentrant=False,
+            )
+        return self._wide_first_fn(hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas)
+
+    def _forward_iteration_narrow_first(self, hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas):
+        """Single loop iteration: [Narrow×4, Wide]. Wrapped for gradient checkpointing."""
+        if self.training and self.use_grad_checkpoint:
+            return grad_checkpoint(
+                self._narrow_first_fn,
+                hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas,
+                use_reentrant=False,
+            )
+        return self._narrow_first_fn(hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas)
+
+    def _wide_first_fn(self, hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas):
+        hidden_states = self.shared_wide(
+            hidden_states, attention_mask=attention_mask,
+            position_ids=position_ids, loop_idx=loop_idx, lora_deltas=wide_deltas,
+        )
+        for _ in range(4):
+            hidden_states = self.shared_narrow(
+                hidden_states, attention_mask=attention_mask,
+                position_ids=position_ids, loop_idx=loop_idx, lora_deltas=narrow_deltas,
+            )
+        return hidden_states
+
+    def _narrow_first_fn(self, hidden_states, attention_mask, position_ids, loop_idx, wide_deltas, narrow_deltas):
+        for _ in range(4):
+            hidden_states = self.shared_narrow(
+                hidden_states, attention_mask=attention_mask,
+                position_ids=position_ids, loop_idx=loop_idx, lora_deltas=narrow_deltas,
+            )
+        hidden_states = self.shared_wide(
+            hidden_states, attention_mask=attention_mask,
+            position_ids=position_ids, loop_idx=loop_idx, lora_deltas=wide_deltas,
+        )
         return hidden_states
