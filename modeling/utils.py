@@ -28,10 +28,20 @@ class SwiGLUMLP(nn.Module):
 
     def forward(self, x: torch.Tensor, lora_deltas: dict = None) -> torch.Tensor:
         if lora_deltas:
-            gate = F.linear(x, self.gate_proj.weight + lora_deltas.get("gate_proj", 0))
-            up = F.linear(x, self.up_proj.weight + lora_deltas.get("up_proj", 0))
-            down_weight = self.down_proj.weight + lora_deltas.get("down_proj", 0)
-            return F.linear(F.silu(gate) * up, down_weight)
+            # Same rationale as gdn2_attention.proj_with_lora: add the LoRA delta to
+            # the output instead of merging it into proj.weight, so this also works
+            # when gate_proj/up_proj/down_proj are quantized (bnb) layers.
+            gate = self.gate_proj(x)
+            if "gate_proj" in lora_deltas:
+                gate = gate + F.linear(x, lora_deltas["gate_proj"])
+            up = self.up_proj(x)
+            if "up_proj" in lora_deltas:
+                up = up + F.linear(x, lora_deltas["up_proj"])
+            hidden = F.silu(gate) * up
+            down = self.down_proj(hidden)
+            if "down_proj" in lora_deltas:
+                down = down + F.linear(hidden, lora_deltas["down_proj"])
+            return down
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
 

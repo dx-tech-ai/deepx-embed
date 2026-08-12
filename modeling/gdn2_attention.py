@@ -23,10 +23,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+import logging
 from typing import Optional
 from einops import rearrange
 
 from .utils import RMSNorm, YaRNRotaryEmbedding, apply_rotary_pos_emb, apply_depth_rotary_emb
+
+logger = logging.getLogger(__name__)
 
 
 class ShortConv1d(nn.Module):
@@ -254,8 +257,13 @@ class GatedDeltaNet2Attention(nn.Module):
             # output: (B, T, H, D) → transpose back to (B, H, T, D)
             return output.transpose(1, 2).to(dtype)
             
-        except (ImportError, RuntimeError) as e:
-            # Sequential recurrence fallback
+        except ImportError:
+            return self._gdn2_sequential(q, k_exp, v_exp, erase_exp, write_exp, alpha_exp, attention_mask)
+        except RuntimeError as e:
+            # Surface kernel failures instead of silently falling back to the
+            # much slower/more memory-hungry sequential path — a silent fallback
+            # here previously made it look like `fla` wasn't doing anything.
+            logger.warning(f"FLA chunk_gated_delta_rule failed, falling back to sequential: {e}")
             return self._gdn2_sequential(q, k_exp, v_exp, erase_exp, write_exp, alpha_exp, attention_mask)
 
     def _gdn2_sequential(
@@ -315,9 +323,15 @@ class GatedDeltaNet2Attention(nn.Module):
 
         # === Projections (with optional LoRA) ===
         def proj_with_lora(proj, x, name):
+            # Route through proj(x) rather than merging the delta into proj.weight —
+            # merging breaks quantized layers (bnb Linear4bit/8bit store weight in a
+            # packed representation, not the logical (out, in) shape). Adding the
+            # low-rank delta to the output is mathematically equivalent for plain
+            # nn.Linear and also works for quantized base layers.
+            out = proj(x)
             if lora_deltas and name in lora_deltas:
-                return F.linear(x, proj.weight + lora_deltas[name], proj.bias if proj.bias is not None else None)
-            return proj(x)
+                out = out + F.linear(x, lora_deltas[name])
+            return out
 
         q_raw = proj_with_lora(self.q_proj, hidden_states, "q_proj")  # (B, T, H*D)
         k_raw = proj_with_lora(self.k_proj, hidden_states, "k_proj")  # (B, T, H_kv*D)

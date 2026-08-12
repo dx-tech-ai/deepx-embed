@@ -8,7 +8,9 @@ Official inference and fine-tuning code for [DeepX Embedding v1.0](https://huggi
 
 ```bash
 pip install torch transformers huggingface_hub einops
-pip install fla        # for FLA Triton kernel (optional, falls back to sequential)
+
+# Required if you plan to fine-tune (see note below). Optional for inference-only use.
+pip install git+https://github.com/fla-org/flash-linear-attention.git
 ```
 
 ```python
@@ -45,10 +47,20 @@ embedding_256d = model.encode("query text", truncate_dim=256)
 git clone https://github.com/dx-tech-ai/deepx-embed.git
 cd deepx-embed
 pip install -e .
-pip install fla        # optional: enables FLA Triton kernel for O(n) inference
+pip install git+https://github.com/fla-org/flash-linear-attention.git
 ```
 
-> **Note**: Without `fla`, the model falls back to sequential attention (slower but functional).
+> **Note on `fla`**: Without it, the model falls back to a sequential Python loop for
+> Gated DeltaNet-2 attention.
+> - **Inference (`encode()`)** — fine either way, the fallback is just slower (no `fla` needed for a quick try).
+> - **Fine-tuning (`LoRAFineTuner.train()`)** — **`fla` is required in practice.** The sequential
+>   fallback keeps a full attention state per timestep for backprop, so memory scales with
+>   sequence length × number of layers instead of O(1). Even 4-bit QLoRA on a tiny batch can
+>   OOM a 12GB GPU without `fla`; installing it fixes this without changing any other config.
+>
+> The `setup.py` `extras_require["fla"]` name and the PyPI package `fla` are unverified/possibly
+> inconsistent — installing straight from the `fla-org/flash-linear-attention` GitHub repo above
+> avoids ambiguity.
 
 ## Fine-tuning
 
@@ -104,6 +116,11 @@ Encode texts to token-level ColBERT vectors.
 
 ### Fine-tuning
 
+> **Requires `fla` installed** (see [Installation](#installation)). The VRAM numbers below assume
+> `fla` is present and the FLA chunked kernel is actually being used. Without it, training falls
+> back to a per-timestep sequential loop and **will OOM well above these numbers** — confirmed on
+> a 12GB GPU (4-bit QLoRA still exhausted all 12GB without `fla`, but fit in ~2-3GB with it).
+
 | Mode | VRAM/RAM | Batch | Speed | Setup |
 |------|----------|-------|-------|-------|
 | **4-bit QLoRA (default)** | ~2-3GB VRAM | 2-4 | Fast | `LoRAFineTuner(model)` |
@@ -111,7 +128,7 @@ Encode texts to token-level ColBERT vectors.
 | fp16 LoRA | ~5-6GB VRAM | 2-4 | Fastest | `LoRAFineTuner(model, quantize=None)` |
 | CPU (fp32) | ~8-16GB RAM | 1-2 | Slow (~30-60s/step) | `DeepXEmbed.from_pretrained(..., device="cpu")` |
 
-> **QLoRA + gradient checkpointing** is enabled by default. Most GPUs with 8GB+ VRAM can fine-tune without any configuration.
+> **QLoRA + gradient checkpointing** is enabled by default. Most GPUs with 8GB+ VRAM can fine-tune without any configuration, provided `fla` is installed.
 
 > **CPU fine-tuning** is functional but slow. Recommend 16GB+ RAM. Quantization not available on CPU (bitsandbytes requires CUDA). Good for testing pipelines before moving to GPU.
 
