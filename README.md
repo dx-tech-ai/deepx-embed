@@ -93,6 +93,28 @@ Encode texts to token-level ColBERT vectors.
 
 - Returns: list of arrays, each (T, 128)
 
+## Hardware Requirements
+
+### Inference
+
+| Device | VRAM/RAM | Notes |
+|--------|----------|-------|
+| GPU (any NVIDIA) | ~3.5GB VRAM | fp16, fast |
+| CPU | ~4GB RAM | Slower (~10x), no CUDA needed |
+
+### Fine-tuning
+
+| Mode | VRAM/RAM | Batch | Speed | Setup |
+|------|----------|-------|-------|-------|
+| **4-bit QLoRA (default)** | ~2-3GB VRAM | 2-4 | Fast | `LoRAFineTuner(model)` |
+| 8-bit LoRA | ~3-4GB VRAM | 2-4 | Fast | `LoRAFineTuner(model, quantize=8)` |
+| fp16 LoRA | ~5-6GB VRAM | 2-4 | Fastest | `LoRAFineTuner(model, quantize=None)` |
+| CPU (fp32) | ~8-16GB RAM | 1-2 | Slow (~30-60s/step) | `DeepXEmbed.from_pretrained(..., device="cpu")` |
+
+> **QLoRA + gradient checkpointing** is enabled by default. Most GPUs with 8GB+ VRAM can fine-tune without any configuration.
+
+> **CPU fine-tuning** is functional but slow. Recommend 16GB+ RAM. Quantization not available on CPU (bitsandbytes requires CUDA). Good for testing pipelines before moving to GPU.
+
 ## License
 
 Apache 2.0

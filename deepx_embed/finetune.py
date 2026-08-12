@@ -125,13 +125,15 @@ class LoRAFineTuner:
         self.trainable_params = [p for p in model.pipeline.backbone.parameters() if p.requires_grad]
         print(f"Trainable parameters: {trainable_count / 1e6:.1f}M")
 
-        # Quantize frozen layers (QLoRA)
-        if quantize is not None:
+        # Quantize frozen layers (QLoRA) — only on CUDA
+        if quantize is not None and model.device != "cpu":
             assert quantize in (4, 8), "quantize must be 4 or 8"
             print(f"Applying {quantize}-bit quantization to frozen layers...")
             _quantize_model(model.pipeline.backbone, bits=quantize)
             self.quantized = quantize
         else:
+            if quantize is not None and model.device == "cpu":
+                print(f"  Note: quantization skipped on CPU (not supported by bitsandbytes)")
             self.quantized = None
 
         # Optimizer — use 8-bit Adam if bitsandbytes available
@@ -163,12 +165,15 @@ class LoRAFineTuner:
             embed_device = next(self.model.pipeline.token_embedding.parameters()).device
             hidden = self.model.pipeline.token_embedding(input_ids.to(embed_device))
         
-        # Move to GPU and enable grad (needed for LoRA gradient flow)
+        # Move to compute device and enable grad (needed for LoRA gradient flow)
         hidden = hidden.to(self.model.device).requires_grad_(True)
         mask = attention_mask.to(self.model.device)
 
-        with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+        if self.model.device == "cpu":
             emb = self.model.pipeline.backbone(hidden, attention_mask=mask, normalize=False)
+        else:
+            with torch.amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                emb = self.model.pipeline.backbone(hidden, attention_mask=mask, normalize=False)
         
         return emb
 
@@ -247,12 +252,15 @@ class LoRAFineTuner:
                         vram = torch.cuda.memory_allocated() / 1024**3 if torch.cuda.is_available() else 0
                         print(f"  epoch {epoch+1}/{epochs} | step {total_steps} | loss {avg:.4f} | VRAM {vram:.1f}GB")
 
-                except torch.cuda.OutOfMemoryError:
-                    torch.cuda.empty_cache()
-                    self.optimizer.zero_grad()
-                    accum_count = 0
-                    print(f"  OOM at step {total_steps}, skipping batch. Try reducing batch_size.")
-                    continue
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    if "out of memory" in str(e).lower():
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        self.optimizer.zero_grad()
+                        accum_count = 0
+                        print(f"  OOM at step {total_steps}, skipping batch. Try reducing batch_size.")
+                        continue
+                    raise
 
             # Flush remaining gradients
             if accum_count > 0:
